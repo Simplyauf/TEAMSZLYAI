@@ -1,0 +1,80 @@
+{
+  "name": "Slack Data Ingestion",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 6
+            }
+          ]
+        }
+      },
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "channel_id",
+              "value": "C1234567890"
+            }
+          ]
+        }
+      },
+      "name": "Set Channel ID",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://backend:8000/ingest",
+        "options": {
+          "headers": {
+            "Content-Type": "application/json"
+          }
+        },
+        "jsonParameters": true,
+        "bodyParametersJson": "{\n  \"source_type\": \"slack\",\n  \"data\": {\n    \"channel_id\": \"{{ $json.channel_id }}\",\n    \"limit\": 100\n  },\n  \"metadata\": {\n    \"workflow_id\": \"slack-ingestion\",\n    \"timestamp\": \"{{ new Date().toISOString() }}\"\n  }\n}"
+      },
+      "name": "Send to Knowledge Base",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [680, 300]
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Set Channel ID",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set Channel ID": {
+      "main": [
+        [
+          {
+            "node": "Send to Knowledge Base",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "slack-ingestion-workflow"
+}
