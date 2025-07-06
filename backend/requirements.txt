@@ -11,6 +11,7 @@ langchain-core==0.1.0
 # Vector database and embeddings
 weaviate-client==3.25.3
 sentence-transformers==2.2.2
+huggingface-hub==0.19.4
 
 # LLM integration
 ollama==0.1.7
