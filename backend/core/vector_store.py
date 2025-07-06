@@ -9,6 +9,7 @@ import logging
 from sentence_transformers import SentenceTransformer
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from .config import settings
 
@@ -20,13 +21,12 @@ class VectorStoreManager:
 
     def __init__(self):
         self.client = None
-        self.embedding_model = None
+        self.embedding_model = SentenceTransformer(settings.embedding_model)
         self.executor = ThreadPoolExecutor(max_workers=4)
 
     async def initialize(self):
-        """Initialize Weaviate client and embedding model"""
+        """Initialize Weaviate client"""
         try:
-            # Initialize Weaviate client
             if settings.weaviate_api_key:
                 auth_config = weaviate.AuthApiKey(api_key=settings.weaviate_api_key)
                 self.client = weaviate.Client(
@@ -36,25 +36,15 @@ class VectorStoreManager:
             else:
                 self.client = weaviate.Client(url=settings.weaviate_url)
 
-            # Test connection
             if not self.client.is_ready():
                 raise Exception("Weaviate is not ready")
 
-            # Initialize embedding model
-            loop = asyncio.get_event_loop()
-            self.embedding_model = await loop.run_in_executor(
-                self.executor,
-                SentenceTransformer,
-                settings.embedding_model
-            )
-
-            # Create schema if it doesn't exist
             await self._create_schema()
 
             logger.info("Vector store initialized successfully")
 
-        except Exception as e:
-            logger.error(f"Failed to initialize vector store: {str(e)}")
+        except Exception:
+            logger.exception("Failed to initialize vector store")
             raise
 
     async def _create_schema(self):
@@ -64,47 +54,19 @@ class VectorStoreManager:
                 {
                     "class": "Document",
                     "description": "A document in the knowledge base",
-                    "vectorizer": "none",  # We'll provide our own vectors
+                    "vectorizer": "none",
                     "properties": [
-                        {
-                            "name": "content",
-                            "dataType": ["text"],
-                            "description": "The content of the document"
-                        },
-                        {
-                            "name": "source",
-                            "dataType": ["string"],
-                            "description": "Source of the document (slack, file, etc.)"
-                        },
-                        {
-                            "name": "source_id",
-                            "dataType": ["string"],
-                            "description": "Unique identifier from the source"
-                        },
-                        {
-                            "name": "title",
-                            "dataType": ["string"],
-                            "description": "Title or subject of the document"
-                        },
-                        {
-                            "name": "author",
-                            "dataType": ["string"],
-                            "description": "Author of the document"
-                        },
-                        {
-                            "name": "timestamp",
-                            "dataType": ["date"],
-                            "description": "When the document was created"
-                        },
-                        {
-                            "name": "channel",
-                            "dataType": ["string"],
-                            "description": "Channel or category (for Slack messages)"
-                        },
+                        {"name": "content", "dataType": ["text"], "description": "Content"},
+                        {"name": "source", "dataType": ["string"], "description": "Source"},
+                        {"name": "source_id", "dataType": ["string"], "description": "Source ID"},
+                        {"name": "title", "dataType": ["string"], "description": "Title"},
+                        {"name": "author", "dataType": ["string"], "description": "Author"},
+                        {"name": "timestamp", "dataType": ["date"], "description": "Timestamp"},
+                        {"name": "channel", "dataType": ["string"], "description": "Channel"},
                         {
                             "name": "metadata",
-                            "dataType": ["object"],
-                            "description": "Additional metadata as JSON"
+                            "dataType": ["text"],  # Fixed: was "object"
+                            "description": "Serialized JSON metadata"
                         }
                     ]
                 }
@@ -112,7 +74,6 @@ class VectorStoreManager:
         }
 
         try:
-            # Check if schema already exists
             existing_schema = self.client.schema.get()
             existing_classes = [cls["class"] for cls in existing_schema.get("classes", [])]
 
@@ -122,8 +83,8 @@ class VectorStoreManager:
             else:
                 logger.info("Weaviate schema already exists")
 
-        except Exception as e:
-            logger.error(f"Failed to create schema: {str(e)}")
+        except Exception:
+            logger.exception("Failed to create schema")
             raise
 
     async def add_documents(self, documents: List[Dict[str, Any]]) -> List[str]:
@@ -132,31 +93,32 @@ class VectorStoreManager:
             document_ids = []
 
             for doc in documents:
-                # Generate embedding
                 content = doc.get("content", "")
                 if not content:
                     continue
 
-                loop = asyncio.get_event_loop()
-                embedding = await loop.run_in_executor(
-                    self.executor,
-                    self.embedding_model.encode,
-                    content
-                )
+                embedding = await asyncio.to_thread(self.embedding_model.encode, content)
 
-                # Prepare document for Weaviate
+                timestamp = doc.get("timestamp")
+                if isinstance(timestamp, datetime):
+                    timestamp = timestamp.isoformat()
+
+                metadata = doc.get("metadata", {})
+                if isinstance(metadata, dict):
+                    import json
+                    metadata = json.dumps(metadata)
+
                 weaviate_doc = {
                     "content": content,
                     "source": doc.get("source", "unknown"),
                     "source_id": doc.get("source_id", ""),
                     "title": doc.get("title", ""),
                     "author": doc.get("author", ""),
-                    "timestamp": doc.get("timestamp"),
+                    "timestamp": timestamp,
                     "channel": doc.get("channel", ""),
-                    "metadata": doc.get("metadata", {})
+                    "metadata": metadata
                 }
 
-                # Add to Weaviate
                 doc_id = self.client.data_object.create(
                     data_object=weaviate_doc,
                     class_name="Document",
@@ -168,22 +130,15 @@ class VectorStoreManager:
             logger.info(f"Added {len(document_ids)} documents to vector store")
             return document_ids
 
-        except Exception as e:
-            logger.error(f"Failed to add documents: {str(e)}")
+        except Exception:
+            logger.exception("Failed to add documents")
             raise
 
     async def search_documents(self, query: str, limit: int = 5, source_filter: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         """Search for documents using semantic similarity"""
         try:
-            # Generate query embedding
-            loop = asyncio.get_event_loop()
-            query_embedding = await loop.run_in_executor(
-                self.executor,
-                self.embedding_model.encode,
-                query
-            )
+            query_embedding = await asyncio.to_thread(self.embedding_model.encode, query)
 
-            # Build Weaviate query
             near_vector = {"vector": query_embedding.tolist()}
 
             query_builder = (
@@ -194,19 +149,17 @@ class VectorStoreManager:
                 .with_additional(["certainty", "distance"])
             )
 
-            # Apply source filter if provided
             if source_filter:
-                where_filter = {
+                query_builder = query_builder.with_where({
                     "path": ["source"],
                     "operator": "ContainsAny",
                     "valueStringArray": source_filter
-                }
-                query_builder = query_builder.with_where(where_filter)
+                })
 
             result = query_builder.do()
 
             documents = []
-            if "data" in result and "Get" in result["data"] and "Document" in result["data"]["Get"]:
+            if result.get("data", {}).get("Get", {}).get("Document"):
                 for doc in result["data"]["Get"]["Document"]:
                     documents.append({
                         "content": doc.get("content", ""),
@@ -216,15 +169,15 @@ class VectorStoreManager:
                         "author": doc.get("author", ""),
                         "timestamp": doc.get("timestamp", ""),
                         "channel": doc.get("channel", ""),
-                        "metadata": doc.get("metadata", {}),
+                        "metadata": doc.get("metadata", ""),
                         "certainty": doc.get("_additional", {}).get("certainty", 0),
                         "distance": doc.get("_additional", {}).get("distance", 1)
                     })
 
             return documents
 
-        except Exception as e:
-            logger.error(f"Failed to search documents: {str(e)}")
+        except Exception:
+            logger.exception("Failed to search documents")
             raise
 
     async def health_check(self) -> bool:
@@ -237,12 +190,9 @@ class VectorStoreManager:
     async def get_stats(self) -> Dict[str, Any]:
         """Get vector store statistics"""
         try:
-            # Get document count
             result = self.client.query.aggregate("Document").with_meta_count().do()
 
-            count = 0
-            if "data" in result and "Aggregate" in result["data"] and "Document" in result["data"]["Aggregate"]:
-                count = result["data"]["Aggregate"]["Document"][0]["meta"]["count"]
+            count = result.get("data", {}).get("Aggregate", {}).get("Document", [{}])[0].get("meta", {}).get("count", 0)
 
             return {
                 "total_documents": count,
@@ -250,6 +200,6 @@ class VectorStoreManager:
                 "embedding_dimension": settings.embedding_dimension
             }
 
-        except Exception as e:
-            logger.error(f"Failed to get stats: {str(e)}")
-            return {"error": str(e)}
+        except Exception:
+            logger.exception("Failed to get stats")
+            return {"error": "Failed to fetch stats"}
